@@ -3,6 +3,12 @@ import requests
 import os
 from scipy.optimize import linear_sum_assignment
 import pickle
+# import matplotlib
+# matplotlib.use('TkAgg')
+# matplotlib.use('qtagg')
+import ipympl
+import matplotlib.pyplot as plt
+import re
 import json
 import copy
 import subprocess
@@ -16,6 +22,11 @@ import tqdm
 from sentence_transformers import SentenceTransformer
 
 import pandas as pd
+from sklearn.preprocessing import label_binarize
+from sklearn.metrics import precision_recall_curve
+from sklearn.metrics import average_precision_score
+from eval_metrices import roc_plot, p_r_plot
+
 def flatten(lst):
     return [x for l in lst for x in l]
 
@@ -183,6 +194,9 @@ def training_zc(df_ref, result_dir, evaluator):
     embeds_dialog_summ = list()
     for idx, (dialog, summ) in enumerate(tqdm.tqdm(zip(df_ref['dialogue'], df_ref['summary']))):
         chunks = flatten([t.strip().split('.') for t in summ.strip().split(',')])[:-1]
+        chunks = [c.strip() for c in chunks]
+        if 0:
+            string = re.sub('\r\n', '', dialog)
         ff = [dialog]
         ff.extend(chunks)
         embs = evaluator.encode_tokens(ff)
@@ -194,33 +208,54 @@ def training_zc(df_ref, result_dir, evaluator):
     with open(os.path.join(result_dir, 'training.pkl'), 'wb') as f:
         pickle.dump(embeds_dialog_summ, f)
 
+def evaluation_ac(result_dir, pkl_file='training1.pkl'):
+    with open(os.path.join(result_dir, pkl_file), 'rb') as f:
+        embeds_dialog_summ = pickle.load(f)
+
+    all_dist_positive = list()
+    all_dist_neg = list()
+    for ix, embs in enumerate(tqdm.tqdm(embeds_dialog_summ)):
+        cos_dists_pos = [cosine_sim(embs[0], t2) for t2 in embs[1:]]
+        all_dist_positive.extend(cos_dists_pos)
+        neg_chunks = [embs[1:] for idx, embs in enumerate(embeds_dialog_summ) if idx != ix]
+        cos_dists_neg = [cosine_sim(embs[0], t2) for t2 in np.concatenate(neg_chunks)]
+        all_dist_neg.extend(cos_dists_neg)
+
+    all_predictions = all_dist_positive + all_dist_neg
+    all_targets = np.concatenate((np.ones_like(all_dist_positive), np.zeros_like(all_dist_neg)))
+    # all_targets_one_hot = label_binarize(all_targets, classes=[0, 1])
+    roc_plot(all_targets, all_predictions, positive_label=1, save_dir=result_dir,
+             unique_id='chunks to dialogs classifier')
+
+
+    neg_hist, neg_bins_edges = np.histogram(all_dist_neg, bins=50, density=True)
+    pos_hist, pos_bins_edges = np.histogram(all_dist_positive, bins=50, density=True)
+    pos_bins = 0.5 * (pos_bins_edges[:-1] + pos_bins_edges[1:])
+    neg_bins = 0.5 * (neg_bins_edges[:-1] + neg_bins_edges[1:])
+    plt.plot(pos_bins, pos_hist, 'r', label='positives')
+    plt.plot(neg_bins, neg_hist, 'b', label='negatives')
+    plt.title("Cosine similarity distribution of chunks to dialogs; support={}".format(len(embeds_dialog_summ)))
+    plt.legend(loc="upper right")
+    plt.grid()
+    plt.savefig(
+            os.path.join(result_dir, pkl_file.split('.')[0]+'.jpg'))
+
 def main():
     # Use a breakpoint in the code line below to debug your script.
-    result_dir = r'C:\Users\h00633314\HanochWorkSpace\Projects\chunk_back_to_summary'
+    result_dir = r'C:\Users\h00633314\HanochWorkSpace\Projects\chunk_back_to_summary\chunks_to_conversations'
     evaluator = VGEvaluation()
+
+
+
+
+    if 0:
+        df_ref = pd.read_csv('reference.csv')
+        training_zc(df_ref, result_dir, evaluator)
+    else:
+        evaluation_ac(result_dir=result_dir, pkl_file='training.pkl')
 
     df_chunks = pd.read_csv('summary_pieces.csv')
     df_dialog = pd.read_csv('dialogues.csv')
-    df_ref = pd.read_csv('reference.csv')
-
-
-    def evaluation_ac(result_dir):
-        with open(result_dir, 'rb') as f:
-            embeds_dialog_summ = pickle.load(f)
-
-        all_dist_positive = list()
-        all_dist_neg = list()
-        for ix, embs in enumerate(embeds_dialog_summ):
-            cos_dists_pos = [cosine_sim(embs[0], t2) for t2 in embs[1:]]
-            all_dist_positive.append(cos_dists_pos)
-            [embs[1:] for idx, embs in enumerate(embeds_dialog_summ) if idx != ix]
-            cos_dists_neg = [cosine_sim(embs[0], t2) for t2 in embs[1:]]
-            all_dist_neg.append()
-
-    if 1:
-        training_zc(df_ref, result_dir, evaluator)
-    evaluation_ac(result_dir=os.path.join(result_dir, 'training1.pkl'))
-
 
 
     with open(os.path.join(result_dir, 'training.pkl'), 'rb') as f:
