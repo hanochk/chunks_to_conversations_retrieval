@@ -1,4 +1,6 @@
 import sys
+
+import numpy
 import requests
 import os
 from scipy.optimize import linear_sum_assignment
@@ -46,7 +48,9 @@ class SimilarityManager:
         # nlp.add_pipe("spacy_wordnet", after='tagger')
         # nlp.add_pipe("spacy_wordnet", after='tagger', config={'lang': nlp.lang})
         # self.nlp = nlp
-        self.similarity_model = SentenceTransformer('sentence-transformers/paraphrase-xlm-r-multilingual-v1')
+        # self.similarity_model = SentenceTransformer('sentence-transformers/paraphrase-xlm-r-multilingual-v1')
+        self.similarity_model = SentenceTransformer('all-MiniLM-L6-v2')
+
         # SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2') # more recent
         if torch.cuda.device_count() > 0:
             self.similarity_model.cuda()
@@ -106,7 +110,7 @@ def greedy_match(similarity_matrix):
 
 def hungarian_match(similarity_matrix):
     B = similarity_matrix
-    return list(zip(*linear_sum_assignment(-B))) #inimum weight matching in bipartite graphs
+    return list(zip(*linear_sum_assignment(-B))) #minimum weight matching in bipartite graphs
 
 
 class VGEvaluation:
@@ -146,16 +150,29 @@ class VGEvaluation:
         scores_matrix = [[self.sm_similarity(x, y) for y in dst] for x in src]
         return np.array(scores_matrix)
 
-    def compute_precision_recall(self, src, dst, assignment_method="hungarian",
+    def compute_scores(self, src_embed, dst_embed,
+                       **kwargs):  # sm = sm_similarity(tuple([obj_gt['label']]), tuple([obj_det['label']])) # get into the format of ('token',)
+        scores_matrix = [[cosine_sim(x, y) for y in dst_embed] for x in src_embed]
+        return np.array(scores_matrix)
+
+    def compute_precision_recall(self, src: str, dst: str, assignment_method="hungarian",
                                  debug_print=False, **kwargs) -> (float, float):
+
         if not src or not dst:
             return (0., 0.)
 
         chunk_2_paragraph = kwargs.pop('chunk_2_paragraph', False)
+        preliminary_embds = kwargs.pop('preliminary_embds', False)
         if chunk_2_paragraph:
+            if preliminary_embds:
+                embds_chunks = kwargs.pop('embds_chunks', None)
+                embds_seg_dialog = kwargs.pop('embds_seg_dialog', None)
 
-
-            A = self.compute_scores(src, dst, **kwargs)
+                # isinstance(src, np.ndarray)
+                # isinstance(dst, np.ndarray)
+                A = self.compute_scores(src_embed=embds_chunks, dst_embed=embds_seg_dialog, **kwargs)
+            else:
+                A = self.compute_scores(src=src, dst=dst, **kwargs)
         else:
             A = self.compute_triplet_scores(src, dst, **kwargs)
 
@@ -174,7 +191,7 @@ class VGEvaluation:
         if debug_print:
             for ind in res:
                 print("{} --- {} ({})".format(src[ind[0]], dst[ind[1]], A[ind]))
-        return np.sum([A[x] for x in res]) / A.shape
+        return np.sum([A[x] for x in res]) / A.shape ,res
 
     def recall_triplets_mean(self, src, dst, **kwargs):
         rc = self.recall_triplets(src, dst, **kwargs)
@@ -190,23 +207,109 @@ class VGEvaluation:
             total_recall.extend(self.recall_triplets(src_i, dst_i, method=methods[i - 1]))
         return total_recall
 
-def training_zc(df_ref, result_dir, evaluator):
-    embeds_dialog_summ = list()
+def training_zs(df_ref, result_dir, evaluator):
+    max_seq_len = int(evaluator.smanager.similarity_model.max_seq_length *0.6)#WordPeice tokens to
+    embds_seg_dialog_summ = list()
+    all_embs_chunks = list()
+    all_chunk = list()
+    chunk_2_summ_id = dict()
+    dialog_2_seg_id = dict()
+    len_chunk_prev = 0
+    len_dialog_seg_prev = 0
+    all_seg_dialogs = list()
+
     for idx, (dialog, summ) in enumerate(tqdm.tqdm(zip(df_ref['dialogue'], df_ref['summary']))):
         chunks = flatten([t.strip().split('.') for t in summ.strip().split(',')])[:-1]
         chunks = [c.strip() for c in chunks]
-        if 0:
-            string = re.sub('\r\n', '', dialog)
-        ff = [dialog]
-        ff.extend(chunks)
-        embs = evaluator.encode_tokens(ff)
-        embeds_dialog_summ.append(embs)
-        if idx % 10 == 0:
-            with open(os.path.join(result_dir, 'training.pkl'), 'wb') as f:
-                pickle.dump(embeds_dialog_summ, f)
+        all_chunk.append(chunks)
+        all_segmented_dialog = paragraph_seg(dialog, max_seq_len)
+        all_seg_dialogs.append(all_segmented_dialog)
 
-    with open(os.path.join(result_dir, 'training.pkl'), 'wb') as f:
-        pickle.dump(embeds_dialog_summ, f)
+        # ff = [dialog]
+        # ff.extend(chunks)
+        embs_chunks = evaluator.encode_tokens(chunks)
+        all_embs_chunks.append(embs_chunks)
+        segmented_dialog_embs = evaluator.encode_tokens(all_segmented_dialog)
+        embds_seg_dialog_summ.append(segmented_dialog_embs)
+
+        chunk_2_summ_id[idx] = list(np.arange(len_chunk_prev, len_chunk_prev + len(chunks)))
+        # assert ( not (any([True if len(flatten(chunk)) > max_seq_len else False for chunk in chunks])))
+        len_chunk_prev += len(chunks)
+
+        dialog_2_seg_id[idx] = list(np.arange(len_dialog_seg_prev, len_dialog_seg_prev + len(all_segmented_dialog)))
+        len_dialog_seg_prev += len(all_segmented_dialog)
+
+
+        # if idx % 10 == 0:
+        #     with open(os.path.join(result_dir, 'training.pkl'), 'wb') as f:
+        #         pickle.dump((embds_seg_dialog_summ, all_embs_chunks), f)
+    # [evaluator.compute_scores(x,y) for x, y in zip(embds_seg_dialog_summ, all_embs_chunks)]
+    with open(os.path.join(result_dir, 'training_embds.pkl'), 'wb') as f:
+        pickle.dump((embds_seg_dialog_summ, all_embs_chunks), f)
+
+
+    with open(os.path.join(result_dir, 'training_chunk_2_summ_id.pkl'), 'wb') as f:
+        pickle.dump(chunk_2_summ_id, f)
+
+    with open(os.path.join(result_dir, 'training_dialog_2_seg_id.pkl'), 'wb') as f:
+        pickle.dump(dialog_2_seg_id, f)
+
+    with open(os.path.join(result_dir, 'training_all_chunk.pkl'), 'wb') as f:
+        pickle.dump(all_chunk, f)
+
+    with open(os.path.join(result_dir, 'training_all_seg_dialogs.pkl'), 'wb') as f:
+        pickle.dump(all_seg_dialogs, f)
+
+def paragraph_seg(dialog, max_seq_len):
+    all_segmented_dialog = list()
+    ptr_beg = 0
+    ptr_end = 0
+    while ptr_beg < len(dialog):
+        delimiter = [(m.start(), m.end()) for m in re.finditer('\r', dialog[ptr_beg:]) if m.start() < max_seq_len]
+        if delimiter != []:
+            ptr_end = delimiter[-1][0]
+        else:
+            ptr_end = max_seq_len  # brute force
+
+        if ptr_end <= 1: # when no delimiter in the range then brute force
+            ptr_end = max_seq_len # brute force
+        window_dialog = re.sub('\r\n', ' ', dialog[ptr_beg:ptr_beg + ptr_end]).strip()
+        ptr_beg += ptr_end
+        all_segmented_dialog.append(window_dialog)
+
+    return all_segmented_dialog
+
+def embeddings_extract(sentence: list, key_tag:str , result_dir: str, evaluator):
+    batch_size = 32
+
+    if len(sentence) % batch_size != 0:  # all images size are Int multiple of batch size
+        pad = batch_size - len(sentence) % batch_size
+    else:
+        pad = 0
+
+    all_embeds_dialog = list()
+    bns = len(sentence)//batch_size
+
+    for idx in np.arange(bns):
+        batch_sent = sentence[idx * batch_size: (idx + 1) * batch_size]
+        batch_sent = [re.sub('\r\n', '', dialog) for dialog in batch_sent] # TODO HK@@
+        embs = evaluator.encode_tokens(batch_sent)
+        all_embeds_dialog.append(embs)
+
+        if idx % 10 == 0:
+            with open(os.path.join(result_dir, str(key_tag) + '.pkl'), 'wb') as f:
+                pickle.dump(all_embeds_dialog, f)
+    if pad != 0:
+        batch_sent = sentence[batch_size * (len(sentence)//batch_size): len(sentence)]
+        embs = evaluator.encode_tokens(batch_sent)
+        all_embeds_dialog.append(embs)
+
+    all_embeds_dialog = np.concatenate(all_embeds_dialog)
+
+    with open(os.path.join(result_dir, str(key_tag) + '.pkl'), 'wb') as f:
+        pickle.dump(all_embeds_dialog, f)
+
+    return all_embeds_dialog
 
 def evaluation_ac(result_dir, pkl_file='training1.pkl'):
     with open(os.path.join(result_dir, pkl_file), 'rb') as f:
@@ -244,34 +347,124 @@ def main():
     # Use a breakpoint in the code line below to debug your script.
     result_dir = r'C:\Users\h00633314\HanochWorkSpace\Projects\chunk_back_to_summary\chunks_to_conversations'
     evaluator = VGEvaluation()
+    analyse_reference = False
+    train_data = True
+    pre_compute_embeddings = False
+
+    print("Max Sequence Length:", evaluator.smanager.similarity_model.max_seq_length)
+
+    if analyse_reference:
+        if 1:
+            df_ref = pd.read_csv('reference.csv')
+            training_zs(df_ref, result_dir, evaluator)
+        else:
+            evaluation_ac(result_dir=result_dir, pkl_file='training.pkl')
+        return
+# TODO check "" vs. ''
+    if pre_compute_embeddings:
+        if train_data:
+            df_ref = pd.read_csv('reference.csv')
+            # dialog_list = df_ref['dialogue'].to_list()
+            # summary = df_ref['summary']
+            # max_seq_len = int(evaluator.smanager.similarity_model.max_seq_length * 0.6)  # WordPeice tokens to
+
+            training_zs(df_ref, result_dir, evaluator)
 
 
+            # chunk_2_summ_id = dict()
+            # chunk_list = list()
+            # len_chunk_prev = 0
+            # for idx, summ in enumerate(tqdm.tqdm(summary)):
+            #     chunks = flatten([t.strip().split('.') for t in summ.strip().split(',')])[:-1]
+            #     chunks = [c.strip() for c in chunks]
+            #     print(len(chunks), list(np.arange(len_chunk_prev,len_chunk_prev+len(chunks))))
+            #     chunk_2_summ_id[idx] = list(np.arange(len_chunk_prev, len_chunk_prev+len(chunks)))
+            #     assert(len(flatten(chunks)) <= max_seq_len)
+            #     len_chunk_prev += len(chunks)
+            #     chunk_list.extend(chunks)
+            #
+            # key_tag_d = 'dialogue_train'
+            # key_tag_chunk = 'chunks_train'
+            #
+            # with open(os.path.join(result_dir, 'chunk_2_summ_id.pkl'), 'wb') as f:
+            #     pickle.dump(chunk_2_summ_id, f)
+
+            # chunks = flatten([t.strip().split('.') for t in summ.strip().split(',') for summ in summary])[:-1]
+            # chunk_list = [c.strip() for c in chunks]
 
 
-    if 0:
-        df_ref = pd.read_csv('reference.csv')
-        training_zc(df_ref, result_dir, evaluator)
+        else: # test data
+            df_chunks = pd.read_csv('summary_pieces.csv')
+            df_dialog = pd.read_csv('dialogues.csv')
+            dialog_list = df_dialog['dialogue'].to_list()
+            chunk_list = df_chunks['summary_piece'].to_list()
+            key_tag_d = 'dialogue'
+            key_tag_chunk = 'chunks'
+
+            all_embds_dialog = embeddings_extract(dialog_list,
+                                key_tag=key_tag_d,
+                                result_dir=result_dir,
+                                evaluator=evaluator)
+
+            all_embds_chunks = embeddings_extract(chunk_list,
+                                key_tag=key_tag_chunk,
+                                result_dir=result_dir,
+                                evaluator=evaluator)
     else:
-        evaluation_ac(result_dir=result_dir, pkl_file='training.pkl')
+        if train_data:
+            # key_tag_d = 'dialogue_train'
+            # key_tag_chunk = 'chunks_train'
+            with open(os.path.join(result_dir, 'training_chunk_2_summ_id.pkl'), 'rb') as f:
+                chunk_2_summ_id = pickle.load(f)
+            with open(os.path.join(result_dir, 'training_dialog_2_seg_id.pkl'), 'rb') as f:
+                dialog_2_seg_id = pickle.load(f)
 
-    df_chunks = pd.read_csv('summary_pieces.csv')
-    df_dialog = pd.read_csv('dialogues.csv')
+            with open(os.path.join(result_dir, 'training_embds.pkl'), 'rb') as f:
+                (all_embds_seg_dialog, all_embds_chunks) = pickle.load(f)
+
+            with open(os.path.join(result_dir, 'training_all_chunk.pkl'), 'rb') as f:
+                all_chunk = pickle.load(f)
+
+            with open(os.path.join(result_dir, 'training_all_seg_dialogs.pkl'), 'rb') as f:
+                all_seg_dialogs = pickle.load(f)
 
 
-    with open(os.path.join(result_dir, 'training.pkl'), 'rb') as f:
-        results_meta = pickle.load(f)
-    pr_gpt, re_gpt = evaluator.compute_precision_recall([df_ref['summary'].loc[0]],
-                                                        [df_ref['dialogue'].loc[0]],
+        else:
+            key_tag_d = 'dialogue'
+            key_tag_chunk = 'chunks'
+
+            with open(os.path.join(result_dir, str(key_tag_chunk) + '.pkl'), 'rb') as f:
+                all_embds_chunks = pickle.load(f)
+
+            with open(os.path.join(result_dir, str(key_tag_d) + '.pkl'), 'rb') as f:
+                all_embds_seg_dialog = pickle.load(f)
+
+    _, res = evaluator.compute_precision_recall(src=flatten(all_chunk), dst=flatten(all_seg_dialogs),
                                                         assignment_method='hungarian',
-                                                        debug_print=True,
-                                                        chunk_2_paragraph=True)
+                                                        debug_print=False,
+                                                        chunk_2_paragraph=True,
+                                                        preliminary_embds=True,
+                                                        embds_chunks = np.concatenate(all_embds_chunks),
+                                                        embds_seg_dialog = np.concatenate(all_embds_seg_dialog))
     # pr_gpt, re_gpt = evaluator.compute_precision_recall(df_chunks['summary_piece'].to_list(),
     #                                                     df_dialog['dialogue'].to_list(),
     #                                                     assignment_method='hungarian',
     #                                                     debug_print=True,
     #                                                     chunk_2_paragraph=True)
+    [(src_chunk, dst_dialog) for src_chunk, dst_dialog in res]
+    tp = 0
+    for tup in res:
+        summ_ind = [key for key, val in chunk_2_summ_id.items() if tup[0] in val][0]
+        dialog_ind = [key for key, val in dialog_2_seg_id.items() if tup[1] in val][0]
+        if dialog_ind == summ_ind:
+            tp += 1
+    print("Recall {}".format(tp/len(res)))
+
     print('ka')
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     main()
+"""
+cosine_sim(*evaluator.encode_tokens(["This is an example sentence", "Each sentence is converted"]))
+"""
