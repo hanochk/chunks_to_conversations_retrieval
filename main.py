@@ -225,8 +225,6 @@ def training_zs(df_ref, result_dir, evaluator):
         all_segmented_dialog = paragraph_seg(dialog, max_seq_len)
         all_seg_dialogs.append(all_segmented_dialog)
 
-        # ff = [dialog]
-        # ff.extend(chunks)
         embs_chunks = evaluator.encode_tokens(chunks)
         all_embs_chunks.append(embs_chunks)
         segmented_dialog_embs = evaluator.encode_tokens(all_segmented_dialog)
@@ -240,10 +238,6 @@ def training_zs(df_ref, result_dir, evaluator):
         len_dialog_seg_prev += len(all_segmented_dialog)
 
 
-        # if idx % 10 == 0:
-        #     with open(os.path.join(result_dir, 'training.pkl'), 'wb') as f:
-        #         pickle.dump((embds_seg_dialog_summ, all_embs_chunks), f)
-    # [evaluator.compute_scores(x,y) for x, y in zip(embds_seg_dialog_summ, all_embs_chunks)]
     with open(os.path.join(result_dir, 'training_embds.pkl'), 'wb') as f:
         pickle.dump((embds_seg_dialog_summ, all_embs_chunks), f)
 
@@ -258,6 +252,36 @@ def training_zs(df_ref, result_dir, evaluator):
         pickle.dump(all_chunk, f)
 
     with open(os.path.join(result_dir, 'training_all_seg_dialogs.pkl'), 'wb') as f:
+        pickle.dump(all_seg_dialogs, f)
+
+
+def create_dialog_seg_embds(dialogue, result_dir, evaluator, tag='test'):
+    max_seq_len = int(evaluator.smanager.similarity_model.max_seq_length *0.6)#WordPeice tokens to
+
+    embds_seg_dialog_summ = list()
+    all_embs_chunks = list()
+    dialog_2_seg_id = dict()
+    len_dialog_seg_prev = 0
+    all_seg_dialogs = list()
+
+    for idx, (dialog) in enumerate(tqdm.tqdm(dialogue)):
+        all_segmented_dialog = paragraph_seg(dialog, max_seq_len)
+        all_seg_dialogs.append(all_segmented_dialog)
+        segmented_dialog_embs = evaluator.encode_tokens(all_segmented_dialog)
+        embds_seg_dialog_summ.append(segmented_dialog_embs)
+
+        dialog_2_seg_id[idx] = list(np.arange(len_dialog_seg_prev, len_dialog_seg_prev + len(all_segmented_dialog)))
+        len_dialog_seg_prev += len(all_segmented_dialog)
+
+
+    # [evaluator.compute_scores(x,y) for x, y in zip(embds_seg_dialog_summ, all_embs_chunks)]
+    with open(os.path.join(result_dir, tag + '_embds.pkl'), 'wb') as f:
+        pickle.dump((embds_seg_dialog_summ), f)
+
+    with open(os.path.join(result_dir, tag + '_dialog_2_seg_id.pkl'), 'wb') as f:
+        pickle.dump(dialog_2_seg_id, f)
+
+    with open(os.path.join(result_dir, tag + '_all_seg_dialogs.pkl'), 'wb') as f:
         pickle.dump(all_seg_dialogs, f)
 
 def paragraph_seg(dialog, max_seq_len):
@@ -348,8 +372,8 @@ def main():
     result_dir = r'C:\Users\h00633314\HanochWorkSpace\Projects\chunk_back_to_summary\chunks_to_conversations'
     evaluator = VGEvaluation()
     analyse_reference = False
-    train_data = True
-    pre_compute_embeddings = False
+    train_data = False
+    pre_compute_embeddings = True
 
     print("Max Sequence Length:", evaluator.smanager.similarity_model.max_seq_length)
 
@@ -398,13 +422,14 @@ def main():
             df_dialog = pd.read_csv('dialogues.csv')
             dialog_list = df_dialog['dialogue'].to_list()
             chunk_list = df_chunks['summary_piece'].to_list()
-            key_tag_d = 'dialogue'
-            key_tag_chunk = 'chunks'
+            # key_tag_d = 'dialogue'
+            key_tag_chunk = 'test_chunks'
 
-            all_embds_dialog = embeddings_extract(dialog_list,
-                                key_tag=key_tag_d,
-                                result_dir=result_dir,
-                                evaluator=evaluator)
+            # all_embds_dialog = embeddings_extract(dialog_list,
+            #                     key_tag=key_tag_d,
+            #                     result_dir=result_dir,
+            #                     evaluator=evaluator)
+            create_dialog_seg_embds(dialog_list, result_dir, evaluator)
 
             all_embds_chunks = embeddings_extract(chunk_list,
                                 key_tag=key_tag_chunk,
@@ -446,19 +471,28 @@ def main():
                                                         preliminary_embds=True,
                                                         embds_chunks = np.concatenate(all_embds_chunks),
                                                         embds_seg_dialog = np.concatenate(all_embds_seg_dialog))
+
     # pr_gpt, re_gpt = evaluator.compute_precision_recall(df_chunks['summary_piece'].to_list(),
     #                                                     df_dialog['dialogue'].to_list(),
     #                                                     assignment_method='hungarian',
     #                                                     debug_print=True,
     #                                                     chunk_2_paragraph=True)
-    [(src_chunk, dst_dialog) for src_chunk, dst_dialog in res]
+
     tp = 0
+    all_errors = list()
     for tup in res:
         summ_ind = [key for key, val in chunk_2_summ_id.items() if tup[0] in val][0]
         dialog_ind = [key for key, val in dialog_2_seg_id.items() if tup[1] in val][0]
         if dialog_ind == summ_ind:
             tp += 1
+        else:
+            all_errors.append((tup, (summ_ind, dialog_ind),
+                               chunk_2_summ_id[summ_ind].index(tup[0]),
+                               dialog_2_seg_id[dialog_ind].index(tup[1]),
+                               all_chunk[summ_ind][chunk_2_summ_id[summ_ind].index(tup[0])],
+                               all_seg_dialogs[dialog_ind][dialog_2_seg_id[dialog_ind].index(tup[1])]))
     print("Recall {}".format(tp/len(res)))
+
 
     print('ka')
 
