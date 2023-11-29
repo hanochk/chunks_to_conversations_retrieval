@@ -18,6 +18,7 @@ import subprocess
 import numpy as np
 import torch
 import tqdm
+np.seterr(all='raise')
 # import spacy
 # import nltk
 # from spacy_wordnet.wordnet_annotator import WordnetAnnotator
@@ -28,7 +29,6 @@ from sklearn.preprocessing import label_binarize
 from sklearn.metrics import precision_recall_curve
 from sklearn.metrics import average_precision_score
 from eval_metrices import roc_plot, p_r_plot
-
 def flatten(lst):
     return [x for l in lst for x in l]
 
@@ -168,8 +168,12 @@ class VGEvaluation:
                 embds_chunks = kwargs.pop('embds_chunks', None)
                 embds_seg_dialog = kwargs.pop('embds_seg_dialog', None)
 
-                # isinstance(src, np.ndarray)
-                # isinstance(dst, np.ndarray)
+                if not isinstance(embds_chunks, np.ndarray):
+                    embds_chunks = np.concatenate(embds_chunks)
+
+                if not isinstance(embds_seg_dialog, np.ndarray):
+                    embds_seg_dialog = np.concatenate(embds_seg_dialog)
+
                 A = self.compute_scores(src_embed=embds_chunks, dst_embed=embds_seg_dialog, **kwargs)
             else:
                 A = self.compute_scores(src=src, dst=dst, **kwargs)
@@ -369,11 +373,11 @@ def evaluation_ac(result_dir, pkl_file='training1.pkl'):
 
 def main():
     # Use a breakpoint in the code line below to debug your script.
-    result_dir = r'C:\Users\h00633314\HanochWorkSpace\Projects\chunk_back_to_summary\chunks_to_conversations'
+    result_dir = r'C:\Users\h00633314\HanochWorkSpace\Projects\chunk_back_to_summary\chunks_to_conversations\bin'
     evaluator = VGEvaluation()
     analyse_reference = False
     train_data = False
-    pre_compute_embeddings = True
+    pre_compute_embeddings = False
 
     print("Max Sequence Length:", evaluator.smanager.similarity_model.max_seq_length)
 
@@ -388,33 +392,7 @@ def main():
     if pre_compute_embeddings:
         if train_data:
             df_ref = pd.read_csv('reference.csv')
-            # dialog_list = df_ref['dialogue'].to_list()
-            # summary = df_ref['summary']
-            # max_seq_len = int(evaluator.smanager.similarity_model.max_seq_length * 0.6)  # WordPeice tokens to
-
             training_zs(df_ref, result_dir, evaluator)
-
-
-            # chunk_2_summ_id = dict()
-            # chunk_list = list()
-            # len_chunk_prev = 0
-            # for idx, summ in enumerate(tqdm.tqdm(summary)):
-            #     chunks = flatten([t.strip().split('.') for t in summ.strip().split(',')])[:-1]
-            #     chunks = [c.strip() for c in chunks]
-            #     print(len(chunks), list(np.arange(len_chunk_prev,len_chunk_prev+len(chunks))))
-            #     chunk_2_summ_id[idx] = list(np.arange(len_chunk_prev, len_chunk_prev+len(chunks)))
-            #     assert(len(flatten(chunks)) <= max_seq_len)
-            #     len_chunk_prev += len(chunks)
-            #     chunk_list.extend(chunks)
-            #
-            # key_tag_d = 'dialogue_train'
-            # key_tag_chunk = 'chunks_train'
-            #
-            # with open(os.path.join(result_dir, 'chunk_2_summ_id.pkl'), 'wb') as f:
-            #     pickle.dump(chunk_2_summ_id, f)
-
-            # chunks = flatten([t.strip().split('.') for t in summ.strip().split(',') for summ in summary])[:-1]
-            # chunk_list = [c.strip() for c in chunks]
 
 
         else: # test data
@@ -455,43 +433,83 @@ def main():
 
 
         else:
-            key_tag_d = 'dialogue'
-            key_tag_chunk = 'chunks'
+            key_tag_chunk = 'test_chunks'
+            tag = 'test'
 
             with open(os.path.join(result_dir, str(key_tag_chunk) + '.pkl'), 'rb') as f:
                 all_embds_chunks = pickle.load(f)
 
-            with open(os.path.join(result_dir, str(key_tag_d) + '.pkl'), 'rb') as f:
+            with open(os.path.join(result_dir, tag + '_embds.pkl'), 'rb') as f:
                 all_embds_seg_dialog = pickle.load(f)
 
-    _, res = evaluator.compute_precision_recall(src=flatten(all_chunk), dst=flatten(all_seg_dialogs),
+            with open(os.path.join(result_dir, tag + '_dialog_2_seg_id.pkl'), 'rb') as f:
+                dialog_2_seg_id = pickle.load(f)
+
+            with open(os.path.join(result_dir, tag + '_all_seg_dialogs.pkl'), 'rb') as f:
+                all_seg_dialogs = pickle.load(f)
+
+            df_chunks = pd.read_csv('summary_pieces.csv')
+            all_chunk = df_chunks['summary_piece'].to_list()
+    if 0:
+        with open(os.path.join(result_dir, 'training_bipartite_matching.pkl'), 'rb') as f:
+            res = pickle.load(f)
+
+    else:
+        _, res = evaluator.compute_precision_recall(src=flatten(all_chunk), dst=flatten(all_seg_dialogs),
                                                         assignment_method='hungarian',
                                                         debug_print=False,
                                                         chunk_2_paragraph=True,
                                                         preliminary_embds=True,
-                                                        embds_chunks = np.concatenate(all_embds_chunks),
-                                                        embds_seg_dialog = np.concatenate(all_embds_seg_dialog))
+                                                        embds_chunks = all_embds_chunks,
+                                                        embds_seg_dialog = all_embds_seg_dialog)
 
     # pr_gpt, re_gpt = evaluator.compute_precision_recall(df_chunks['summary_piece'].to_list(),
     #                                                     df_dialog['dialogue'].to_list(),
     #                                                     assignment_method='hungarian',
     #                                                     debug_print=True,
     #                                                     chunk_2_paragraph=True)
+    if train_data:
+        tp = 0
+        all_errors = list()
+        chunk_2_dialog_match = dict()
+        for tup in res:
+            summ_ind = [key for key, val in chunk_2_summ_id.items() if tup[0] in val][0]
+            dialog_ind = [key for key, val in dialog_2_seg_id.items() if tup[1] in val][0]
+            if not (chunk_2_dialog_match.get(dialog_ind, None)):
+                chunk_2_dialog_match[dialog_ind] = [np.concatenate(all_chunk)[tup[0]]]
+            else:
+                chunk_2_dialog_match[dialog_ind].append(np.concatenate(all_chunk)[tup[0]])
 
-    tp = 0
-    all_errors = list()
-    for tup in res:
-        summ_ind = [key for key, val in chunk_2_summ_id.items() if tup[0] in val][0]
-        dialog_ind = [key for key, val in dialog_2_seg_id.items() if tup[1] in val][0]
-        if dialog_ind == summ_ind:
-            tp += 1
-        else:
-            all_errors.append((tup, (summ_ind, dialog_ind),
-                               chunk_2_summ_id[summ_ind].index(tup[0]),
-                               dialog_2_seg_id[dialog_ind].index(tup[1]),
-                               all_chunk[summ_ind][chunk_2_summ_id[summ_ind].index(tup[0])],
-                               all_seg_dialogs[dialog_ind][dialog_2_seg_id[dialog_ind].index(tup[1])]))
-    print("Recall {}".format(tp/len(res)))
+            if dialog_ind == summ_ind:
+                tp += 1
+            else:
+                all_errors.append((tup, (summ_ind, dialog_ind),
+                                   chunk_2_summ_id[summ_ind].index(tup[0]),
+                                   dialog_2_seg_id[dialog_ind].index(tup[1]),
+                                   all_chunk[summ_ind][chunk_2_summ_id[summ_ind].index(tup[0])],
+                                   all_seg_dialogs[dialog_ind][dialog_2_seg_id[dialog_ind].index(tup[1])]))
+        print("Recall {}".format(tp/len(res)))
+
+        pd.DataFrame.from_dict(chunk_2_dialog_match, orient='index').transpose().to_csv(
+            os.path.join(result_dir, 'training_bipartite_matching_results.csv'))
+
+        with open(os.path.join(result_dir, 'training_bipartite_matching.pkl'), 'wb') as f:
+            pickle.dump(res, f)
+
+    else:
+        chunk_2_dialog_match = dict()
+        for tup in res:
+            dialog_ind = [key for key, val in dialog_2_seg_id.items() if tup[1] in val][0] + 1 #index in csv starts from 1
+            if not (chunk_2_dialog_match.get(dialog_ind, None)):
+                chunk_2_dialog_match[dialog_ind] = [all_chunk[tup[0]]]
+            else:
+                chunk_2_dialog_match[dialog_ind].append(all_chunk[tup[0]])
+
+        pd.DataFrame.from_dict(chunk_2_dialog_match, orient='index').to_csv(
+            os.path.join(result_dir, 'test_bipartite_matching_results.csv'))
+
+        with open(os.path.join(result_dir, 'test_bipartite_matching.pkl'), 'wb') as f:
+            pickle.dump(res, f)
 
 
     print('ka')
