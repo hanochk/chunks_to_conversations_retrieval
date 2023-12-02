@@ -40,46 +40,6 @@ class SimilarityManager:
         if torch.cuda.device_count() > 0:
             self.similarity_model.cuda()
 
-    # def similarity(self, src, target):
-    #     rc = []
-    #     s1 = self.nlp(src)
-    #     s2 = self.nlp(target)
-    #     for w in s1:
-    #         if w.pos_ not in ['NOUN', 'ADJ', 'ADV', 'VERB', 'PROPN'] and len(s1) > 1:
-    #             continue
-    #         rc.append(max([w.similarity(x) for x in s2]))
-    #     return np.mean(rc)
-
-    # def compare_cross_synsets(self, text1, text2):
-    #     t1 = self.nlp(text1)
-    #     t2 = self.nlp(text2)
-    #     return compare_cross_lists([x._.wordnet.synsets() for x in t1], [x._.wordnet.synsets() for x in t2])
-
-    # def compare_triplet(self, t1, t2, method='bert', invert_src=False, invert_dst=False, **kwargs):
-    #     if len(t1) != len(t2):
-    #         return 0.
-    #     sim = 1.
-    #     if method == 'bert':
-    #         if len(t1) == 2:  # attribute tuple, invert
-    #             if invert_src:
-    #                 t1 = [t1[1], t1[0]]
-    #             if invert_dst:
-    #                 t2 = [t2[1], t2[0]]
-    #         embs = self.similarity_model.encode([' '.join(t1).lower(), ' '.join(t2).lower()])
-    #         sim = cosine_sim(*embs)
-    #     elif method == 'meteor':
-    #         return nltk.translate.meteor_score.single_meteor_score(' '.join(t1).lower().split(),
-    #                                                                ' '.join(t2).lower().split())
-    #     else:
-    #         for x, y in zip(t1, t2):
-    #             if method == 'wordnet':
-    #                 sim *= self.compare_cross_synsets(x, y)
-    #             elif method == 'spacy':
-    #                 sim *= self.similarity(x, y)
-    #             else:
-    #                 print("Unknown similarity method: {}".format(method))
-    #     return sim
-
 
 def greedy_match(similarity_matrix):
     A = similarity_matrix
@@ -101,23 +61,6 @@ def hungarian_match(similarity_matrix):
 class VGEvaluation:
     def __init__(self):
         self.smanager = SimilarityManager()
-
-    def recall_triplet(self, src, dst, **kwargs):
-        if not dst:
-            return 0.
-        scores = [self.smanager.compare_triplet(src, x, **kwargs) for x in dst]
-        return max(scores)
-
-    # src: A list of triplets
-    # dst: A list of triplets
-    def recall_triplets(self, src, dst, **kwargs):
-        rc = [self.recall_triplet(x, dst, **kwargs) for x in src]
-        return rc
-        # return np.mean(rc)
-
-    def compute_triplet_scores(self, src, dst, **kwargs):
-        scores_matrix = [[self.smanager.compare_triplet(x, y, **kwargs) for y in dst] for x in src]
-        return np.array(scores_matrix)
 
     def encode_tokens (self, t1: list):
         embs = self.smanager.similarity_model.encode([t.lower() for t in t1])
@@ -168,10 +111,6 @@ class VGEvaluation:
             func = greedy_match
         elif assignment_method == 'hungarian':
             func = hungarian_match
-        elif assignment_method == 'relaxed':
-            recall = self.recall_triplets_mean(dst, src, **kwargs)
-            precision = self.recall_triplets_mean(src, dst, **kwargs)
-            return (precision, recall)
         else:
             raise "compute_precision_recall: Unknown method"
         res = func(A.copy())
@@ -180,19 +119,6 @@ class VGEvaluation:
                 print("{} --- {} ({})".format(src[ind[0]], dst[ind[1]], A[ind]))
         return np.sum([A[x] for x in res]) / A.shape ,res
 
-    def recall_triplets_mean(self, src, dst, **kwargs):
-        rc = self.recall_triplets(src, dst, **kwargs)
-        if not rc:
-            return 0.
-        return np.mean(rc)
-
-    def total_recall_triplets(self, src_triplets, dst_triplets, methods=('bert', 'bert', 'bert')):
-        total_recall = []
-        for i in [1, 2, 3]:
-            dst_i = [x for x in dst_triplets if len(x) == i]
-            src_i = [x for x in src_triplets if len(x) == i]
-            total_recall.extend(self.recall_triplets(src_i, dst_i, method=methods[i - 1]))
-        return total_recall
 
 def training_zs(df_ref, result_dir: str, evaluator, clean_noisy_segment: bool=True):
     max_seq_len = int(evaluator.smanager.similarity_model.max_seq_length *0.6)#WordPeice tokens to
@@ -209,8 +135,6 @@ def training_zs(df_ref, result_dir: str, evaluator, clean_noisy_segment: bool=Tr
         chunks = flatten([t.strip().split('.') for t in summ.strip().split(',')])[:-1]
         chunks = [c.strip() for c in chunks]
         all_chunk.append(chunks)
-        # if 1:
-        #     dialog = ' '.join([convert_abbrev(x) for x in dialog.split(' ')])
         all_segmented_dialog = paragraph_seg(dialog, max_seq_len, clean_noisy_segment=clean_noisy_segment)
         all_seg_dialogs.append(all_segmented_dialog)
 
@@ -273,7 +197,7 @@ def create_dialog_seg_embds(dialogue, result_dir, evaluator, clean_noisy_segment
     with open(os.path.join(result_dir, tag + '_all_seg_dialogs.pkl'), 'wb') as f:
         pickle.dump(all_seg_dialogs, f)
 
-def paragraph_seg(dialog: str, max_seq_len: int, clean_noisy_segment: bool=True):
+def paragraph_seg(dialog: str, max_seq_len: int, clean_noisy_segment: bool=False):
     all_segmented_dialog = list()
     ptr_beg = 0
     ptr_end = 0
@@ -290,7 +214,9 @@ def paragraph_seg(dialog: str, max_seq_len: int, clean_noisy_segment: bool=True)
 
         if clean_noisy_segment:
             window_dialog = re.sub('\r\n', ' . ', dialog[ptr_beg:ptr_beg + ptr_end]).strip()
-            all_dirty_window.append(window_dialog)
+            all_dirty_window.append(window_dialog) # for debug
+            if 1:
+                window_dialog = ' '.join([convert_abbrev(x) for x in window_dialog.split(' ')])
             window_dialog = ' '.join([remove_abbrev(x) for x in window_dialog.split(' ')])
             window_dialog = ' '.join([remove_abbrev_post_comma(x) for x in window_dialog.split(' ')])
             window_dialog = ' '.join([remove_abbrev_post_period(x) for x in window_dialog.split(' ')])
@@ -375,7 +301,6 @@ def main():
     result_dir = r'C:\Users\h00633314\HanochWorkSpace\Projects\chunk_back_to_summary\chunks_to_conversations\bin'
     evaluator = VGEvaluation()
 
-    # analyse_reference = False
     train_data = True
     pre_compute_embeddings = False
     clean_noisy_segment = False
@@ -383,15 +308,9 @@ def main():
 
     print("Max Sequence Length:", evaluator.smanager.similarity_model.max_seq_length)
 
-    # if analyse_reference:
-    #     if 1:
-    #         df_ref = pd.read_csv('reference.csv')
-    #         training_zs(df_ref, result_dir, evaluator)
-    #     else:
-    #         evaluation_ac(result_dir=result_dir, pkl_file='training.pkl')
-    #     return
 # TODO check "" vs. ''
     if pre_compute_embeddings:
+        print("precompute embeddings saved to pickles")
         compute_embeddings(clean_noisy_segment, evaluator, result_dir, train_data)
         return
     else:
@@ -402,6 +321,7 @@ def main():
             res = pickle.load(f)
 
     else:
+        print('Running minimum cost assignment based matching')
         _, res = evaluator.compute_precision_recall(src=flatten(all_chunk), dst=flatten(all_seg_dialogs),
                                                         assignment_method='hungarian',
                                                         debug_print=False,
@@ -437,7 +357,13 @@ def main():
 
         with open(os.path.join(result_dir, denoise_tag + 'training_bipartite_matching.pkl'), 'wb') as f:
             pickle.dump(res, f)
-
+    # ind = 0
+    # evaluator.sm_similarity(all_errors[ind][-2], all_errors[ind][-1])
+    # all_seg_dialogs[all_errors[ind][1][0]]
+    # df_ref = pd.read_csv('reference.csv')
+    # src_dialog = df_ref['dialogue']
+    # src_dialog[all_errors[ind][1][0] ]
+    # evaluator.sm_similarity(all_errors[0][-2], all_seg_dialogs[all_errors[0][1][0]][3])
     else:
         chunk_2_dialog_match = dict()
         for tup in res:
