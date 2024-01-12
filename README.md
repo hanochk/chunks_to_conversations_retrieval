@@ -1,4 +1,10 @@
 # chunks_to_conversations
+
+Dataset was taken out of sumsum - bout 16k messenger-like conversations with summaries
+https://huggingface.co/datasets/samsum?row=9
+
+The summaries were broken into chunks of sentences and were mixed out among all. Next we need to attribute the chunks that came out from the summaries to the right conversation.
+
 Settings
 
 First, compute embeddings  
